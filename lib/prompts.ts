@@ -50,5 +50,5 @@ TASK: ${copyType.description}`;
 
 export function getModelForType(copyTypeId: CopyTypeId): string {
   const ct = COPY_TYPES.find((c) => c.id === copyTypeId);
-  return ct && "useOpus" in ct && ct.useOpus ? "claude-3-5-sonnet-20241022" : "claude-3-5-sonnet-20241022";
+  return ct && "useOpus" in ct && ct.useOpus ? "claude-sonnet-4-20250514" : "claude-sonnet-4-20250514";
 }

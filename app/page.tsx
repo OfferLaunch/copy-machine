@@ -1,34 +1,94 @@
 "use client";
 
-import { useState, useRef, useCallback } from "react";
-import { OFFERS, COPY_TYPES } from "@/lib/offers";
+import { useState, useRef, useCallback, useEffect } from "react";
+import { COPY_TYPES } from "@/lib/offers";
+import Link from "next/link";
+
+interface OfferItem {
+  id: string;
+  name: string;
+  description: string;
+  priceRange: string;
+  avatar: string;
+}
 
 export default function Home() {
+  const [offers, setOffers] = useState<OfferItem[]>([]);
   const [offerId, setOfferId] = useState("");
   const [copyTypeId, setCopyTypeId] = useState("");
   const [customDetails, setCustomDetails] = useState("");
   const [promo, setPromo] = useState("");
   const [avatar, setAvatar] = useState("");
   const [angle, setAngle] = useState("");
+  const [customPrompt, setCustomPrompt] = useState("");
+  const [customPieces, setCustomPieces] = useState<number | "">("");
+  const [customTone, setCustomTone] = useState("");
+  const [customLength, setCustomLength] = useState("");
+  const [customOtherDetails, setCustomOtherDetails] = useState("");
   const [output, setOutput] = useState("");
   const [loading, setLoading] = useState(false);
   const [copied, setCopied] = useState(false);
   const [tab, setTab] = useState<"generate" | "autopilot">("generate");
+  const [feedback, setFeedback] = useState("");
+  const [thumbs, setThumbs] = useState<"up" | "down" | null>(null);
+  const [savingSwipe, setSavingSwipe] = useState(false);
+  const [showFeedbackPanel, setShowFeedbackPanel] = useState(false);
+  const [savedToast, setSavedToast] = useState(false);
+  // Highlight-to-feedback state
+  const [selectedText, setSelectedText] = useState("");
+  const [sectionFeedback, setSectionFeedback] = useState("");
+  const [popoverPos, setPopoverPos] = useState<{ x: number; y: number } | null>(null);
+  const outputRef = useRef<HTMLDivElement>(null);
+  const popoverRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
 
-  const generate = useCallback(async () => {
+  useEffect(() => {
+    fetch("/api/offers").then((r) => r.json()).then(setOffers).catch(() => {});
+  }, []);
+
+  const generate = useCallback(async (opts?: {
+    feedbackText?: string;
+    previousOutput?: string;
+    selectedText?: string;
+    sectionFeedback?: string;
+    mode?: "full" | "section";
+  }) => {
     if (!offerId || !copyTypeId) return;
     setLoading(true);
     setOutput("");
     setCopied(false);
+    setThumbs(null);
 
     abortRef.current = new AbortController();
+
+    let details = customDetails || "";
+    if (opts?.mode !== "section" && opts?.feedbackText && opts?.previousOutput) {
+      details = (details ? details + "\n\n" : "") +
+        `FEEDBACK ON PREVIOUS OUTPUT: ${opts.feedbackText}\n\nPREVIOUS OUTPUT:\n${opts.previousOutput}\n\nRewrite incorporating this feedback.`;
+    }
+
+    const payload: Record<string, any> = { offerId, copyTypeId, customDetails: details, promo, avatar, angle };
+    if (copyTypeId === "custom") {
+      payload.customPrompt = customPrompt;
+      payload.customParams = {
+        pieces: customPieces || undefined,
+        tone: customTone || undefined,
+        length: customLength || undefined,
+        otherDetails: customOtherDetails || undefined,
+      };
+    }
+    if (opts?.mode === "section") {
+      payload.mode = "section";
+      payload.previousOutput = opts.previousOutput;
+      payload.selectedText = opts.selectedText;
+      payload.sectionFeedback = opts.sectionFeedback;
+    }
 
     try {
       const res = await fetch("/api/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ offerId, copyTypeId, customDetails, promo, avatar, angle }),
+        body: JSON.stringify(payload),
         signal: abortRef.current.signal,
       });
 
@@ -59,15 +119,127 @@ export default function Home() {
     } finally {
       setLoading(false);
     }
-  }, [offerId, copyTypeId, customDetails, promo, avatar, angle]);
+  }, [offerId, copyTypeId, customDetails, promo, avatar, angle, customPrompt, customPieces, customTone, customLength, customOtherDetails]);
 
   const stop = () => abortRef.current?.abort();
+
+  const handleThumbsUp = async () => {
+    if (thumbs === "up") { setThumbs(null); return; }
+    setThumbs("up");
+    setSavingSwipe(true);
+    const copyTypeName = COPY_TYPES.find((c) => c.id === copyTypeId)?.name || copyTypeId;
+    try {
+      await fetch("/api/swipes", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          type: "text",
+          tags: ["generated", copyTypeName],
+          offerId,
+          copyTypeId,
+          content: output,
+          source: "generated",
+        }),
+      });
+    } catch {}
+    setSavingSwipe(false);
+  };
+
+  const handleRegenerate = () => {
+    if (!feedback.trim()) return;
+    const prev = output;
+    const fb = feedback;
+    setFeedback("");
+    setShowFeedbackPanel(false);
+    // Save feedback to persistent log
+    fetch("/api/feedback", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ offerId, copyTypeId, feedback: fb, context: prev?.slice(0, 200) }),
+    }).catch(() => {});
+    generate({ feedbackText: fb, previousOutput: prev });
+  };
+
+  const handleSectionRewrite = () => {
+    if (!sectionFeedback.trim() || !selectedText) return;
+    const prev = output;
+    const sel = selectedText;
+    const fb = sectionFeedback;
+    setSectionFeedback("");
+    setSelectedText("");
+    setPopoverPos(null);
+    // Save feedback to persistent log
+    fetch("/api/feedback", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ offerId, copyTypeId, feedback: fb, context: sel?.slice(0, 200) }),
+    }).catch(() => {});
+    generate({ mode: "section", previousOutput: prev, selectedText: sel, sectionFeedback: fb });
+  };
+
+  const handleSave = () => {
+    const offerName = offers.find((o) => o.id === offerId)?.name || "copy";
+    const copyTypeName = copyTypeId === "custom" ? "custom" : (COPY_TYPES.find((c) => c.id === copyTypeId)?.name || "output");
+    const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    const filename = `${offerName}-${copyTypeName}-${ts}.txt`.replace(/\s+/g, "-");
+    const blob = new Blob([output], { type: "text/plain" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+    setSavedToast(true);
+    setTimeout(() => setSavedToast(false), 2000);
+  };
 
   const copyToClipboard = () => {
     navigator.clipboard.writeText(output);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
+
+  // Handle text selection in output for highlight-to-feedback
+  const handleOutputMouseUp = useCallback(() => {
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed || !outputRef.current) {
+      return;
+    }
+    const text = selection.toString().trim();
+    if (!text) return;
+    // Check selection is within output div
+    const range = selection.getRangeAt(0);
+    if (!outputRef.current.contains(range.commonAncestorContainer)) return;
+    const rect = range.getBoundingClientRect();
+    const containerRect = outputRef.current.getBoundingClientRect();
+    setSelectedText(text);
+    setSectionFeedback("");
+    setPopoverPos({
+      x: rect.left - containerRect.left + rect.width / 2,
+      y: rect.bottom - containerRect.top + 8,
+    });
+  }, []);
+
+  // Dismiss popover on Escape or click outside
+  useEffect(() => {
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") { setPopoverPos(null); setSelectedText(""); }
+    };
+    const handleClick = (e: MouseEvent) => {
+      if (popoverRef.current && !popoverRef.current.contains(e.target as Node)) {
+        setPopoverPos(null);
+        setSelectedText("");
+      }
+    };
+    if (popoverPos) {
+      document.addEventListener("keydown", handleKey);
+      setTimeout(() => document.addEventListener("mousedown", handleClick), 100);
+      return () => {
+        document.removeEventListener("keydown", handleKey);
+        document.removeEventListener("mousedown", handleClick);
+      };
+    }
+  }, [popoverPos]);
 
   const selectedCopyType = COPY_TYPES.find((c) => c.id === copyTypeId);
 
@@ -82,23 +254,43 @@ export default function Home() {
               Copy Machine <span className="text-neutral-500 font-normal text-sm">by OfferLaunch</span>
             </h1>
           </div>
-          <div className="flex gap-1 bg-neutral-800/50 rounded-lg p-1">
-            <button
-              onClick={() => setTab("generate")}
-              className={`px-4 py-1.5 rounded-md text-sm font-medium transition ${
-                tab === "generate" ? "bg-gold-500 text-black" : "text-neutral-400 hover:text-white"
-              }`}
+          <div className="flex items-center gap-4">
+            <div className="flex gap-1 bg-neutral-800/50 rounded-lg p-1">
+              <button
+                onClick={() => setTab("generate")}
+                className={`px-4 py-1.5 rounded-md text-sm font-medium transition ${
+                  tab === "generate" ? "bg-gold-500 text-black" : "text-neutral-400 hover:text-white"
+                }`}
+              >
+                Generate
+              </button>
+              <button
+                onClick={() => setTab("autopilot")}
+                className={`px-4 py-1.5 rounded-md text-sm font-medium transition ${
+                  tab === "autopilot" ? "bg-gold-500 text-black" : "text-neutral-400 hover:text-white"
+                }`}
+              >
+                Autopilot
+              </button>
+            </div>
+            <Link
+              href="/offers"
+              className="px-4 py-1.5 rounded-md text-sm font-medium text-neutral-400 hover:text-white border border-neutral-700 hover:border-neutral-500 transition"
             >
-              Generate
-            </button>
-            <button
-              onClick={() => setTab("autopilot")}
-              className={`px-4 py-1.5 rounded-md text-sm font-medium transition ${
-                tab === "autopilot" ? "bg-gold-500 text-black" : "text-neutral-400 hover:text-white"
-              }`}
+              Offers
+            </Link>
+            <Link
+              href="/swipes"
+              className="px-4 py-1.5 rounded-md text-sm font-medium text-neutral-400 hover:text-white border border-neutral-700 hover:border-neutral-500 transition"
             >
-              Autopilot
-            </button>
+              Swipes
+            </Link>
+            <Link
+              href="/knowledge"
+              className="px-4 py-1.5 rounded-md text-sm font-medium text-neutral-400 hover:text-white border border-neutral-700 hover:border-neutral-500 transition"
+            >
+              Knowledge
+            </Link>
           </div>
         </div>
       </header>
@@ -116,7 +308,7 @@ export default function Home() {
                   className="w-full bg-neutral-900 border border-neutral-700 rounded-lg px-4 py-3 text-white focus:border-gold-500 focus:ring-1 focus:ring-gold-500 outline-none transition"
                 >
                   <option value="">Select an offer...</option>
-                  {OFFERS.map((o) => (
+                  {offers.map((o) => (
                     <option key={o.id} value={o.id}>
                       {o.name} ({o.priceRange})
                     </option>
@@ -137,6 +329,8 @@ export default function Home() {
                       {c.name}
                     </option>
                   ))}
+                  <option disabled>──────────</option>
+                  <option value="custom">✨ Custom</option>
                 </select>
                 {selectedCopyType && (
                   <p className="text-xs text-neutral-500 mt-1.5">
@@ -146,7 +340,85 @@ export default function Home() {
                     )}
                   </p>
                 )}
+                {copyTypeId === "custom" && (
+                  <p className="text-xs text-neutral-500 mt-1.5">Describe exactly what you need and we&apos;ll generate it.</p>
+                )}
               </div>
+
+              {/* Custom Copy Type Fields */}
+              {copyTypeId === "custom" && (
+                <div className="space-y-4 bg-[#1A1A1A] border border-[#333] rounded-xl p-4">
+                  <div>
+                    <label className="block text-sm font-medium text-neutral-300 mb-2">What do you need?</label>
+                    <textarea
+                      value={customPrompt}
+                      onChange={(e) => setCustomPrompt(e.target.value)}
+                      placeholder="e.g. 5-email no-show follow-up sequence, webinar reminder series, win-back campaign for churned clients..."
+                      rows={3}
+                      className="w-full bg-[#0A0A0A] border border-[#333] rounded-lg px-4 py-3 text-white placeholder-neutral-600 focus:border-[#D4A843] focus:ring-1 focus:ring-[#D4A843] outline-none transition resize-none"
+                    />
+                  </div>
+                  <div className="grid grid-cols-3 gap-3">
+                    <div>
+                      <label className="block text-xs font-medium text-neutral-400 mb-1.5">
+                        Pieces <span className="text-neutral-600">optional</span>
+                      </label>
+                      <input
+                        type="number"
+                        min={1}
+                        value={customPieces}
+                        onChange={(e) => setCustomPieces(e.target.value ? parseInt(e.target.value) : "")}
+                        placeholder="e.g. 5"
+                        className="w-full bg-[#0A0A0A] border border-[#333] rounded-lg px-3 py-2 text-sm text-white placeholder-neutral-600 outline-none focus:border-[#D4A843] transition"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-neutral-400 mb-1.5">
+                        Tone <span className="text-neutral-600">optional</span>
+                      </label>
+                      <select
+                        value={customTone}
+                        onChange={(e) => setCustomTone(e.target.value)}
+                        className="w-full bg-[#0A0A0A] border border-[#333] rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-[#D4A843] transition"
+                      >
+                        <option value="">Any</option>
+                        <option value="Urgent">Urgent</option>
+                        <option value="Casual">Casual</option>
+                        <option value="Professional">Professional</option>
+                        <option value="Aggressive">Aggressive</option>
+                        <option value="Empathetic">Empathetic</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-neutral-400 mb-1.5">
+                        Length <span className="text-neutral-600">optional</span>
+                      </label>
+                      <select
+                        value={customLength}
+                        onChange={(e) => setCustomLength(e.target.value)}
+                        className="w-full bg-[#0A0A0A] border border-[#333] rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-[#D4A843] transition"
+                      >
+                        <option value="">Any</option>
+                        <option value="Short">Short</option>
+                        <option value="Medium">Medium</option>
+                        <option value="Long">Long</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-neutral-400 mb-1.5">
+                      Other details <span className="text-neutral-600">optional</span>
+                    </label>
+                    <textarea
+                      value={customOtherDetails}
+                      onChange={(e) => setCustomOtherDetails(e.target.value)}
+                      placeholder="Any other parameters or instructions..."
+                      rows={2}
+                      className="w-full bg-[#0A0A0A] border border-[#333] rounded-lg px-3 py-2 text-sm text-white placeholder-neutral-600 outline-none focus:border-[#D4A843] transition resize-none"
+                    />
+                  </div>
+                </div>
+              )}
 
               <div>
                 <label className="block text-sm font-medium text-neutral-300 mb-2">
@@ -200,10 +472,10 @@ export default function Home() {
 
               <div className="flex gap-3 pt-2">
                 <button
-                  onClick={generate}
-                  disabled={!offerId || !copyTypeId || loading}
+                  onClick={() => generate()}
+                  disabled={!offerId || !copyTypeId || loading || (copyTypeId === "custom" && !customPrompt.trim())}
                   className={`flex-1 py-3 rounded-lg font-semibold text-sm transition ${
-                    !offerId || !copyTypeId
+                    !offerId || !copyTypeId || (copyTypeId === "custom" && !customPrompt.trim())
                       ? "bg-neutral-800 text-neutral-600 cursor-not-allowed"
                       : loading
                       ? "bg-gold-600 text-black animate-pulse-gold cursor-wait"
@@ -227,28 +499,135 @@ export default function Home() {
             <div className="flex flex-col">
               <div className="flex items-center justify-between mb-3">
                 <h2 className="text-sm font-medium text-neutral-400">Output</h2>
-                {output && (
-                  <button
-                    onClick={copyToClipboard}
-                    className="text-xs px-3 py-1.5 rounded-md bg-neutral-800 text-neutral-300 hover:bg-neutral-700 hover:text-white transition"
-                  >
-                    {copied ? "✓ Copied" : "Copy All"}
-                  </button>
-                )}
               </div>
-              <div className="flex-1 min-h-[500px] bg-neutral-900/50 border border-neutral-800 rounded-lg p-5 overflow-auto">
+              <div
+                ref={outputRef}
+                onMouseUp={handleOutputMouseUp}
+                className="relative flex-1 min-h-[500px] bg-neutral-900/50 border border-neutral-800 rounded-lg p-5 overflow-auto"
+              >
                 {output ? (
-                  <pre className="whitespace-pre-wrap font-sans text-sm text-neutral-200 leading-relaxed">{output}</pre>
+                  <pre className="whitespace-pre-wrap font-sans text-sm text-neutral-200 leading-relaxed select-text">{output}</pre>
                 ) : (
                   <div className="flex items-center justify-center h-full text-neutral-600 text-sm">
                     Select an offer and copy type, then hit Generate.
                   </div>
                 )}
+
+                {/* Highlight-to-Feedback Popover */}
+                {popoverPos && selectedText && (
+                  <div
+                    ref={popoverRef}
+                    className="absolute z-50 w-72 bg-[#1A1A1A] border border-[#333] rounded-xl shadow-2xl p-3"
+                    style={{
+                      left: `${Math.min(popoverPos.x - 144, (outputRef.current?.clientWidth || 300) - 290)}px`,
+                      top: `${popoverPos.y}px`,
+                    }}
+                  >
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-xs text-neutral-400">Rewrite selection</span>
+                      <button
+                        onClick={() => { setPopoverPos(null); setSelectedText(""); }}
+                        className="text-neutral-500 hover:text-white text-sm leading-none"
+                      >✕</button>
+                    </div>
+                    <textarea
+                      value={sectionFeedback}
+                      onChange={(e) => setSectionFeedback(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSectionRewrite(); } }}
+                      placeholder="What should change about this?"
+                      rows={3}
+                      className="w-full bg-[#0A0A0A] border border-[#333] rounded-lg px-3 py-2 text-sm text-white placeholder-neutral-600 outline-none resize-none focus:border-[#D4A843] transition"
+                      autoFocus
+                    />
+                    <button
+                      onClick={handleSectionRewrite}
+                      disabled={!sectionFeedback.trim()}
+                      className={`mt-2 w-full py-1.5 rounded-lg text-sm font-medium transition ${
+                        sectionFeedback.trim()
+                          ? "bg-[#D4A843] text-black hover:bg-[#c49a3a]"
+                          : "bg-neutral-800 text-neutral-600 cursor-not-allowed"
+                      }`}
+                    >
+                      Rewrite Section
+                    </button>
+                  </div>
+                )}
               </div>
+
+              {/* Action Bar */}
+              {output && !loading && (
+                <>
+                  <div className="mt-3 flex items-center justify-between bg-[#1A1A1A] border border-[#333] rounded-lg px-4 py-2.5">
+                    <div className="flex items-center gap-1">
+                      <button
+                        onClick={handleSave}
+                        title="Download as .txt"
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm text-neutral-400 hover:text-[#D4A843] border border-transparent hover:border-[#D4A843]/30 transition"
+                      >
+                        <span>💾</span>
+                        <span className="text-xs">{savedToast ? "Saved!" : "Save"}</span>
+                      </button>
+                      <button
+                        onClick={copyToClipboard}
+                        title="Copy to clipboard"
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm text-neutral-400 hover:text-[#D4A843] border border-transparent hover:border-[#D4A843]/30 transition"
+                      >
+                        <span>📋</span>
+                        <span className="text-xs">{copied ? "Copied!" : "Copy"}</span>
+                      </button>
+                      <button
+                        onClick={handleThumbsUp}
+                        title="Save to Swipe Vault"
+                        className={`flex items-center gap-1 px-3 py-1.5 rounded-lg text-sm transition ${thumbs === "up" ? "text-[#D4A843]" : "text-neutral-400 hover:text-[#D4A843]"}`}
+                      >
+                        {savingSwipe ? "⏳" : "👍"}
+                      </button>
+                      <button
+                        onClick={() => setThumbs(thumbs === "down" ? null : "down")}
+                        className={`flex items-center gap-1 px-3 py-1.5 rounded-lg text-sm transition ${thumbs === "down" ? "text-red-500" : "text-neutral-400 hover:text-red-500"}`}
+                      >
+                        👎
+                      </button>
+                    </div>
+                    <button
+                      onClick={() => setShowFeedbackPanel(!showFeedbackPanel)}
+                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm transition ${
+                        showFeedbackPanel ? "text-[#D4A843] border border-[#D4A843]/30" : "text-neutral-400 hover:text-[#D4A843] border border-transparent hover:border-[#D4A843]/30"
+                      }`}
+                    >
+                      <span>💬</span>
+                      <span className="text-xs">Feedback</span>
+                    </button>
+                  </div>
+
+                  {/* Feedback Panel */}
+                  {showFeedbackPanel && (
+                    <div className="mt-2 bg-[#1A1A1A] border border-[#333] rounded-lg px-4 py-3 space-y-3">
+                      <input
+                        value={feedback}
+                        onChange={(e) => setFeedback(e.target.value)}
+                        onKeyDown={(e) => e.key === "Enter" && handleRegenerate()}
+                        placeholder="What should change overall?"
+                        className="w-full bg-[#0A0A0A] border border-[#333] rounded-lg px-4 py-2.5 text-sm text-white placeholder-neutral-600 outline-none focus:border-[#D4A843] transition"
+                      />
+                      <button
+                        onClick={handleRegenerate}
+                        disabled={!feedback.trim()}
+                        className={`px-5 py-2 rounded-lg text-sm font-medium transition ${
+                          feedback.trim()
+                            ? "bg-[#D4A843] text-black hover:bg-[#c49a3a]"
+                            : "bg-neutral-800 text-neutral-600 cursor-not-allowed"
+                        }`}
+                      >
+                        Regenerate All
+                      </button>
+                    </div>
+                  )}
+                </>
+              )}
             </div>
           </div>
         ) : (
-          /* Autopilot Tab */
           <AutopilotPanel />
         )}
       </main>

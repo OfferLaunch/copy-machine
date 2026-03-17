@@ -1,4 +1,18 @@
-export const OFFERS = [
+import { put, head, list } from "@vercel/blob";
+
+export interface StoredOffer {
+  id: string;
+  name: string;
+  description: string;
+  priceRange: string;
+  avatar: string;
+  trainingMaterial?: string;
+  copyTypes?: string[]; // which copy type ids are enabled; if empty/undefined = all
+}
+
+const BLOB_NAME = "offers.json";
+
+const DEFAULT_OFFERS: StoredOffer[] = [
   {
     id: "ex",
     name: "Ecom Accelerator (EX)",
@@ -41,18 +55,63 @@ export const OFFERS = [
     priceRange: "$5,000 - $15,000",
     avatar: "Crypto-savvy investors 25-45. Already on Polymarket or interested in prediction markets. Want automated edge. Comfortable with alternative investments and emerging platforms.",
   },
-] as const;
+];
 
-export const COPY_TYPES = [
-  { id: "vsl", name: "VSL Script", description: "Full video sales letter script (15-45 min)", useOpus: true },
-  { id: "ads", name: "Ad Copy (5 variations)", description: "5 unique ad variations for paid media" },
-  { id: "emails", name: "Email Sequence (7 emails)", description: "7-email nurture/sales sequence" },
-  { id: "landing", name: "Landing Page Copy", description: "Full landing page with headline, body, CTA" },
-  { id: "objections", name: "Objection Handlers", description: "Common objections with rebuttals" },
-  { id: "texts", name: "Follow-up Texts", description: "SMS/text follow-up sequences" },
-  { id: "onepager", name: "One-Pager / Sales Sheet", description: "Single-page sales document" },
-  { id: "social", name: "Social Media Posts", description: "Platform-specific social content" },
-] as const;
+async function findBlobUrl(): Promise<string | null> {
+  try {
+    const { blobs } = await list({ prefix: BLOB_NAME });
+    if (blobs.length > 0) return blobs[0].url;
+    return null;
+  } catch {
+    return null;
+  }
+}
 
-export type OfferId = (typeof OFFERS)[number]["id"];
-export type CopyTypeId = (typeof COPY_TYPES)[number]["id"] | "custom";
+export async function getOffers(): Promise<StoredOffer[]> {
+  try {
+    const url = await findBlobUrl();
+    if (!url) {
+      // First run - seed with defaults
+      await saveOffers(DEFAULT_OFFERS);
+      return DEFAULT_OFFERS;
+    }
+    const res = await fetch(url, { cache: "no-store" });
+    return await res.json();
+  } catch {
+    return DEFAULT_OFFERS;
+  }
+}
+
+export async function saveOffers(offers: StoredOffer[]): Promise<void> {
+  // Delete old blob first, then write new one
+  try {
+    const oldUrl = await findBlobUrl();
+    if (oldUrl) {
+      const { del } = await import("@vercel/blob");
+      await del(oldUrl);
+    }
+  } catch {}
+  await put(BLOB_NAME, JSON.stringify(offers, null, 2), {
+    access: "public",
+    addRandomSuffix: true,
+    contentType: "application/json",
+  });
+}
+
+export async function getOffer(id: string): Promise<StoredOffer | undefined> {
+  const offers = await getOffers();
+  return offers.find((o) => o.id === id);
+}
+
+export async function upsertOffer(offer: StoredOffer): Promise<void> {
+  const offers = await getOffers();
+  const idx = offers.findIndex((o) => o.id === offer.id);
+  if (idx >= 0) offers[idx] = offer;
+  else offers.push(offer);
+  await saveOffers(offers);
+}
+
+export async function deleteOffer(id: string): Promise<void> {
+  const offers = await getOffers();
+  await saveOffers(offers.filter((o) => o.id !== id));
+}

@@ -2,16 +2,10 @@ import { NextRequest } from "next/server";
 import { getKnowledge, addKnowledge, deleteKnowledgeById } from "@/lib/knowledge-storage";
 
 export async function GET(req: NextRequest) {
-  try {
-    const scope = req.nextUrl.searchParams.get("scope");
-    const debug = req.nextUrl.searchParams.get("debug");
-    const docs = await getKnowledge();
-    if (debug) return Response.json({ count: docs.length, hasToken: !!process.env.BLOB_READ_WRITE_TOKEN, tokenPrefix: process.env.BLOB_READ_WRITE_TOKEN?.slice(0, 20) });
-    if (scope) return Response.json(docs.filter((d) => d.scope === scope));
-    return Response.json(docs);
-  } catch (e: any) {
-    return Response.json({ error: e.message, stack: e.stack?.split("\n").slice(0, 5) }, { status: 500 });
-  }
+  const scope = req.nextUrl.searchParams.get("scope");
+  const docs = await getKnowledge();
+  if (scope) return Response.json(docs.filter((d) => d.scope === scope));
+  return Response.json(docs);
 }
 
 export async function POST(req: NextRequest) {
